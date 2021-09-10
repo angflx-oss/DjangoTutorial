@@ -1,62 +1,65 @@
-from django.shortcuts import render
-from django.http import Http404
-from .models import Board, Topic,Post
-from django.contrib.auth.models import User
-from django.shortcuts import render, redirect, get_object_or_404
-from .forms import NewTopicForm, PostForm
-from .models import Board, Topic, Post
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import get_object_or_404, redirect, render
 from django.db.models import Count
-from django.views.generic import UpdateView
+from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+from django.conf import settings
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views.generic import UpdateView, ListView
 from django.utils import timezone
 from django.utils.decorators import method_decorator
-from django.views.generic import ListView
-from django.core.paginator import Paginator
-from django.db.models import Count
-from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.urls import reverse
+from .forms import NewTopicForm, PostForm
+from .models import Board, Post, Topic
 
-def home(request):
-    boards = Board.objects.all()
-    return render(request, 'home.html', {'boards': boards})
 
 class BoardListView(ListView):
     model = Board
     context_object_name = 'boards'
     template_name = 'home.html'
 
-def board_topics(request, pk):
-    board = get_object_or_404(Board, pk=pk)
-    queryset = board.topics.order_by('-last_updated').annotate(replies=Count('posts') - 1)
-    page = request.GET.get('page', 1)
 
-    paginator = Paginator(queryset, 20)
+class TopicListView(ListView):
+    model = Topic
+    context_object_name = 'topics'
+    template_name = 'topics.html'
+    paginate_by = 20
 
-    try:
-        topics = paginator.page(page)
-    except PageNotAnInteger:
-        # fallback to the first page
-        topics = paginator.page(1)
-    except EmptyPage:
-        # probably the user tried to add a page number
-        # in the url, so we fallback to the last page
-        topics = paginator.page(paginator.num_pages)
+    def get_context_data(self, **kwargs):
+        kwargs['board'] = self.board
+        return super().get_context_data(**kwargs)
 
-    return render(request, 'topics.html', {'board': board, 'topics': topics})
+    def get_queryset(self):
+        self.board = get_object_or_404(Board, pk=self.kwargs.get('pk'))
+        queryset = self.board.topics.order_by('-last_updated').annotate(replies=Count('posts') - 1)
+        return queryset
 
-def topic_posts(request, pk, topic_pk):
-   topic = get_object_or_404(Topic, board__pk=pk, pk=topic_pk)
-   topic.views += 1
-   topic.save()
-   return render(request, 'topic_posts.html', {'topic': topic})
+
+class PostListView(ListView):
+    model = Post
+    context_object_name = 'posts'
+    template_name = 'topic_posts.html'
+    paginate_by = 20
+
+    def get_context_data(self, **kwargs):
+        session_key = 'viewed_topic_{}'.format(self.topic.pk)
+        if not self.request.session.get(session_key, False):
+            self.topic.views += 1
+            self.topic.save()
+            self.request.session[session_key] = True
+        kwargs['topic'] = self.topic
+        return super().get_context_data(**kwargs)
+
+    def get_queryset(self):
+        self.topic = get_object_or_404(Topic, board__pk=self.kwargs.get('pk'), pk=self.kwargs.get('topic_pk'))
+        queryset = self.topic.posts.order_by('created_at')
+        return queryset
+
 
 @login_required
 def new_topic(request, pk):
     board = get_object_or_404(Board, pk=pk)
     if request.method == 'POST':
         form = NewTopicForm(request.POST)
-        if form.is_valid():
+        if form.is_valid() and recaptcha_is_valid(request):
             topic = form.save(commit=False)
             topic.board = board
             topic.starter = request.user
@@ -70,12 +73,14 @@ def new_topic(request, pk):
     else:
         form = NewTopicForm()
     return render(request, 'new_topic.html', {'board': board, 'form': form})
+
+
 @login_required
 def reply_topic(request, pk, topic_pk):
     topic = get_object_or_404(Topic, board__pk=pk, pk=topic_pk)
     if request.method == 'POST':
         form = PostForm(request.POST)
-        if form.is_valid():
+        if form.is_valid() and recaptcha_is_valid(request):
             post = form.save(commit=False)
             post.topic = topic
             post.created_by = request.user
@@ -96,6 +101,7 @@ def reply_topic(request, pk, topic_pk):
         form = PostForm()
     return render(request, 'reply_topic.html', {'topic': topic, 'form': form})
 
+
 @method_decorator(login_required, name='dispatch')
 class PostUpdateView(UpdateView):
     model = Post
@@ -114,25 +120,3 @@ class PostUpdateView(UpdateView):
         post.updated_at = timezone.now()
         post.save()
         return redirect('topic_posts', pk=post.topic.board.pk, topic_pk=post.topic.pk)
-
-class PostListView(ListView):
-    model = Post
-    context_object_name = 'posts'
-    template_name = 'topic_posts.html'
-    paginate_by = 20
-
-    def get_context_data(self, **kwargs):
-
-        session_key = 'viewed_topic_{}'.format(self.topic.pk)  # <-- here
-        if not self.request.session.get(session_key, False):
-            self.topic.views += 1
-            self.topic.save()
-            self.request.session[session_key] = True           # <-- until here
-
-        kwargs['topic'] = self.topic
-        return super().get_context_data(**kwargs)
-
-    def get_queryset(self):
-        self.topic = get_object_or_404(Topic, board__pk=self.kwargs.get('pk'), pk=self.kwargs.get('topic_pk'))
-        queryset = self.topic.posts.order_by('created_at')
-        return queryset
